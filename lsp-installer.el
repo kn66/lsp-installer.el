@@ -18,7 +18,7 @@
 ;;
 ;; Features:
 ;; - Unified configuration format for all servers
-;; - Multiple installation methods: npm, pip, go, gem, github, binary, dotnet
+;; - Multiple installation methods: npm, pip, go, gem, github, binary, dotnet, coursier
 ;; - Simple error handling and validation
 ;; - Interactive commands with completion
 ;; - Automatic path management
@@ -69,10 +69,7 @@
     (dotnet . "dotnet")
     (gem . "gem")
     (curl . "curl")
-    (wget . "wget")
     (tar . "tar")
-    (unzip . "unzip")
-    (7z . "7z")
     (java . "java"))
   "Alist of executable names.")
 
@@ -83,11 +80,11 @@
 
 ;;; Utility functions
 
-(defun lsp-installer--message (format-string &rest args)
+(defun lsp-installer--msg (format-string &rest args)
   "Display a message with LSP-INSTALLER prefix."
   (message "[LSP-INSTALLER] %s" (apply #'format format-string args)))
 
-(defun lsp-installer--error (format-string &rest args)
+(defun lsp-installer--err (format-string &rest args)
   "Signal an error with LSP-INSTALLER prefix."
   (error "[LSP-INSTALLER] %s" (apply #'format format-string args)))
 
@@ -117,13 +114,7 @@
   (let ((server-dir
          (lsp-installer--get-server-install-dir server-name)))
     (and (file-directory-p server-dir)
-         (not (lsp-installer--directory-empty-p server-dir)))))
-
-(defun lsp-installer--directory-empty-p (directory)
-  "Check if DIRECTORY is empty."
-  (when (file-directory-p directory)
-    (let ((files (directory-files directory nil "^[^.]")))
-      (null files))))
+         (directory-files server-dir nil "^[^.]"))))
 
 
 ;;; Configuration management
@@ -144,8 +135,8 @@
   (interactive)
   (setq lsp-installer--servers-cache nil)
   (lsp-installer--load-config)
-  (lsp-installer--message "Configuration reloaded from %s"
-                          lsp-installer-servers-file))
+  (lsp-installer--msg "Configuration reloaded from %s"
+                      lsp-installer-servers-file))
 
 (defun lsp-installer--get-server-config (server-name)
   "Get configuration for SERVER-NAME."
@@ -165,48 +156,42 @@
   (when (file-directory-p lsp-installer-install-dir)
     (cl-remove-if-not
      (lambda (dir)
-       (let ((full-path
-              (expand-file-name dir lsp-installer-install-dir)))
-         (and (file-directory-p full-path)
-              (not (lsp-installer--directory-empty-p full-path)))))
+       (file-directory-p
+        (expand-file-name dir lsp-installer-install-dir)))
      (directory-files lsp-installer-install-dir nil "^[^.]"))))
 
 (defun lsp-installer--validate-config (server-name config)
   "Validate server configuration CONFIG for SERVER-NAME."
   (unless config
-    (lsp-installer--error "Server %s not found" server-name))
+    (lsp-installer--err "Server %s not found" server-name))
   (let ((method (plist-get config :install-method))
         (source (plist-get config :source))
         (executable (plist-get config :executable))
         (path-dirs (plist-get config :path-dirs)))
     (unless (and method source executable path-dirs)
-      (lsp-installer--error
+      (lsp-installer--err
        "Server %s: incomplete configuration (missing method, source, executable, or path-dirs)"
        server-name))
     (unless (member
              method
-             '("npm" "pip" "go" "dotnet" "gem" "binary" "github"))
-      (lsp-installer--error "Server %s: unsupported method %s"
-                            server-name
-                            method))
+             '("npm"
+               "pip"
+               "go"
+               "dotnet"
+               "gem"
+               "coursier"
+               "binary"
+               "github"))
+      (lsp-installer--err "Server %s: unsupported method %s"
+                          server-name
+                          method))
     ;; Validate :path-dirs - now required and must be a list of strings
     (unless (and (listp path-dirs) (cl-every #'stringp path-dirs))
-      (lsp-installer--error
+      (lsp-installer--err
        "Server %s: :path-dirs is required and must be a list of strings"
        server-name))
     t))
 
-;;; Unified error handling wrapper
-
-(defmacro lsp-installer--with-error-handling (server-name &rest body)
-  "Execute BODY with unified error handling for SERVER-NAME."
-  `(condition-case err
-       (progn
-         ,@body)
-     (error
-      (lsp-installer--error "Failed to install %s: %s"
-                            ,server-name
-                            (error-message-string err)))))
 
 ;;; Path management
 
@@ -241,9 +226,9 @@
         (add-to-list 'exec-path path)
         (cl-incf added)))
     (when (> added 0)
-      (lsp-installer--message "Added %d path(s) for %s"
-                              added
-                              server-name))))
+      (lsp-installer--msg "Added %d path(s) for %s"
+                          added
+                          server-name))))
 
 (defun lsp-installer--remove-from-exec-path (server-name)
   "Remove SERVER-NAME's bin directories from exec-path."
@@ -259,159 +244,109 @@
         (setq exec-path (remove path exec-path))
         (cl-incf removed)))
     (when (> removed 0)
-      (lsp-installer--message "Removed %d path(s) for %s"
-                              removed
-                              server-name))))
+      (lsp-installer--msg "Removed %d path(s) for %s"
+                          removed
+                          server-name))))
 
 ;;; Installation methods - consolidated and simplified
+
+(defun lsp-installer--run-command (program args &optional cwd)
+  "Run PROGRAM with ARGS in CWD. Return exit code."
+  (let ((default-directory (or cwd default-directory)))
+    (apply #'call-process program nil "*lsp-installer*" t args)))
 
 (defun lsp-installer--install-npm (server-name source)
   "Install npm package SOURCE for SERVER-NAME."
   (let* ((server-dir
           (lsp-installer--get-server-install-dir server-name))
-         (package-spec source)
          (npm-exe (lsp-installer--executable-find 'npm)))
     (unless npm-exe
-      (lsp-installer--error "npm not found in PATH"))
+      (lsp-installer--err "npm not found in PATH"))
     (lsp-installer--ensure-directory server-dir)
-    (let ((default-directory server-dir))
-      ;; Create package.json if needed
-      (unless (file-exists-p "package.json")
-        (with-temp-file "package.json"
-          (insert
-           (json-encode
-            '((name . "lsp-server") (version . "1.0.0"))))))
-      ;; Install package
-      (let ((exit-code
-             (call-process npm-exe
-                           nil
-                           "*lsp-installer*"
-                           t
-                           "install"
-                           package-spec)))
-        (unless (= exit-code 0)
-          (lsp-installer--error "npm install failed (exit code: %d)"
-                                exit-code))))))
+    (unless (file-exists-p
+             (expand-file-name "package.json" server-dir))
+      (with-temp-file (expand-file-name "package.json" server-dir)
+        (insert
+         (json-encode '((name . "lsp-server") (version . "1.0.0"))))))
+    (let ((exit-code
+           (lsp-installer--run-command npm-exe
+                                       (list "install" source)
+                                       server-dir)))
+      (unless (= exit-code 0)
+        (lsp-installer--err "npm install failed (exit code: %d)"
+                            exit-code)))))
 
 (defun lsp-installer--install-pip (server-name source)
   "Install pip package SOURCE for SERVER-NAME."
   (let* ((server-dir
           (lsp-installer--get-server-install-dir server-name))
-         (package-spec source)
-         (pip-exe (lsp-installer--executable-find 'pip))
+         (venv-dir (expand-file-name "venv" server-dir))
          (python-exe
-          (or (executable-find "python3") (executable-find "python")))
-         (venv-dir (expand-file-name "venv" server-dir)))
-    (unless (and pip-exe python-exe)
-      (lsp-installer--error "pip/python not found in PATH"))
+          (or (executable-find "python3")
+              (executable-find "python"))))
+    (unless python-exe
+      (lsp-installer--err "python not found in PATH"))
     (lsp-installer--ensure-directory server-dir)
-    ;; Create virtual environment
     (let ((exit-code
-           (call-process python-exe
-                         nil
-                         "*lsp-installer*"
-                         t
-                         "-m"
-                         "venv"
-                         venv-dir)))
+           (lsp-installer--run-command
+            python-exe (list "-m" "venv" venv-dir))))
       (unless (= exit-code 0)
-        (lsp-installer--error
+        (lsp-installer--err
          "Failed to create virtual environment (exit code: %d)"
          exit-code)))
-    ;; Install package in venv
     (let* ((venv-pip
             (expand-file-name (if (eq system-type 'windows-nt)
                                   "Scripts/pip.exe"
                                 "bin/pip")
                               venv-dir))
            (exit-code
-            (call-process venv-pip
-                          nil
-                          "*lsp-installer*"
-                          t
-                          "install"
-                          package-spec)))
+            (lsp-installer--run-command
+             venv-pip (list "install" source))))
       (unless (= exit-code 0)
-        (lsp-installer--error "pip install failed (exit code: %d)"
-                              exit-code)))))
-
+        (lsp-installer--err "pip install failed (exit code: %d)"
+                            exit-code)))))
 
 (defun lsp-installer--install-go (server-name source)
   "Install Go binary SOURCE for SERVER-NAME."
   (let* ((server-dir
           (lsp-installer--get-server-install-dir server-name))
          (bin-dir (expand-file-name "bin" server-dir))
-         (go-exe (lsp-installer--executable-find 'go)))
+         (go-exe (lsp-installer--executable-find 'go))
+         (process-environment (copy-sequence process-environment)))
     (unless go-exe
-      (lsp-installer--error "Go not found in PATH"))
+      (lsp-installer--err "Go not found in PATH"))
     (lsp-installer--ensure-directory bin-dir)
-    (let ((process-environment (copy-sequence process-environment)))
-      (setenv "GOPATH" (expand-file-name "go" server-dir))
-      (setenv "GOBIN" bin-dir)
-      (let ((exit-code
-             (call-process go-exe
-                           nil
-                           "*lsp-installer*"
-                           t
-                           "install"
-                           source)))
-        (unless (= exit-code 0)
-          (lsp-installer--error "go install failed (exit code: %d)"
-                                exit-code))))))
+    (setenv "GOPATH" (expand-file-name "go" server-dir))
+    (setenv "GOBIN" bin-dir)
+    (let ((exit-code
+           (lsp-installer--run-command
+            go-exe (list "install" source))))
+      (unless (= exit-code 0)
+        (lsp-installer--err "go install failed (exit code: %d)"
+                            exit-code)))))
 
 (defun lsp-installer--install-gem (server-name source)
   "Install Ruby gem SOURCE for SERVER-NAME."
   (let* ((server-dir
           (lsp-installer--get-server-install-dir server-name))
          (bin-dir (expand-file-name "bin" server-dir))
-         (gem-exe (lsp-installer--executable-find 'gem))
-         (install-args (list "install" source)))
+         (gem-exe (lsp-installer--executable-find 'gem)))
     (unless gem-exe
-      (lsp-installer--error "gem not found in PATH"))
-    ;; Debug: show which gem executable we found
-    (lsp-installer--message "Found gem executable: %s" gem-exe)
-    ;; Test gem executable before proceeding
-    (let ((test-exit-code
-           (call-process gem-exe nil nil nil "--version")))
-      (unless (= test-exit-code 0)
-        (lsp-installer--error
-         "gem executable test failed (exit code: %d). gem may not be working properly."
-         test-exit-code)))
-    ;; Add install directory arguments
+      (lsp-installer--err "gem not found in PATH"))
     (lsp-installer--ensure-directory bin-dir)
-    (setq install-args
-          (append
-           install-args
-           (list "--install-dir" server-dir "--bindir" bin-dir)))
-    ;; Log the command being executed for debugging
-    (lsp-installer--message "Executing: %s %s"
-                            gem-exe
-                            (mapconcat 'identity install-args " "))
-    ;; Create a temporary buffer to capture output
-    (let ((output-buffer
-           (generate-new-buffer "*gem-install-output*")))
-      (unwind-protect
-          (let ((exit-code
-                 (apply #'call-process
-                        gem-exe
-                        nil
-                        output-buffer
-                        t
-                        install-args)))
-            (unless (= exit-code 0)
-              ;; Show the actual gem command output for debugging
-              (let ((output
-                     (with-current-buffer output-buffer
-                       (buffer-string))))
-                (lsp-installer--error
-                 "gem install failed (exit code: %d)\nCommand: %s %s\nOutput:\n%s"
-                 exit-code
-                 gem-exe
-                 (mapconcat 'identity install-args " ")
-                 output))))
-        ;; Always cleanup the temporary buffer
-        (when (buffer-live-p output-buffer)
-          (kill-buffer output-buffer))))))
+    (let ((exit-code
+           (lsp-installer--run-command
+            gem-exe
+            (list
+             "install"
+             source
+             "--install-dir"
+             server-dir
+             "--bindir"
+             bin-dir))))
+      (unless (= exit-code 0)
+        (lsp-installer--err "gem install failed (exit code: %d)"
+                            exit-code)))))
 
 (defun lsp-installer--install-dotnet (server-name source)
   "Install .NET tool SOURCE for SERVER-NAME."
@@ -420,82 +355,89 @@
          (tools-dir (expand-file-name "tools" server-dir))
          (dotnet-exe (lsp-installer--executable-find 'dotnet)))
     (unless dotnet-exe
-      (lsp-installer--error ".NET SDK not found in PATH"))
+      (lsp-installer--err ".NET SDK not found in PATH"))
     (lsp-installer--ensure-directory tools-dir)
     (let ((exit-code
-           (call-process dotnet-exe
-                         nil
-                         "*lsp-installer*"
-                         t
-                         "tool"
-                         "install"
-                         source
-                         "--tool-path"
-                         tools-dir)))
+           (lsp-installer--run-command
+            dotnet-exe
+            (list "tool" "install" source "--tool-path" tools-dir))))
       (unless (= exit-code 0)
-        (lsp-installer--error
+        (lsp-installer--err
          "dotnet tool install failed (exit code: %d)"
          exit-code)))))
+
+(defun lsp-installer--install-coursier (server-name source)
+  "Install Coursier package SOURCE for SERVER-NAME."
+  (let* ((server-dir
+          (lsp-installer--get-server-install-dir server-name))
+         (bin-dir (expand-file-name "bin" server-dir))
+         (coursier-exe (or (executable-find "coursier") "coursier"))
+         (process-environment (copy-sequence process-environment)))
+    (unless (executable-find coursier-exe)
+      (lsp-installer--err "coursier not found in PATH"))
+    (lsp-installer--ensure-directory bin-dir)
+    (setenv "COURSIER_BIN_DIR" bin-dir)
+    (let ((exit-code
+           (lsp-installer--run-command
+            coursier-exe (list "install" source))))
+      (unless (= exit-code 0)
+        (lsp-installer--err "coursier install failed (exit code: %d)"
+                            exit-code)))))
 
 ;;; Download and extraction utilities
 
 (defun lsp-installer--download-file (url target-file)
   "Download file from URL to TARGET-FILE."
   (lsp-installer--ensure-directory (file-name-directory target-file))
-  (let ((curl-exe (lsp-installer--executable-find 'curl))
-        (wget-exe (lsp-installer--executable-find 'wget)))
-    (cond
-     (curl-exe
-      (let ((exit-code
-             (call-process curl-exe
-                           nil
-                           "*lsp-installer*"
-                           t
-                           "-L"
-                           "-f"
-                           "--create-dirs"
-                           "-o"
-                           target-file
-                           url)))
-        (unless (= exit-code 0)
-          (lsp-installer--error "curl download failed (exit code: %d)"
-                                exit-code))))
-     (wget-exe
-      (let ((exit-code
-             (call-process wget-exe
-                           nil
-                           "*lsp-installer*"
-                           t
-                           "-O"
-                           target-file
-                           url)))
-        (unless (= exit-code 0)
-          (lsp-installer--error "wget download failed (exit code: %d)"
-                                exit-code))))
-     (t
-      (lsp-installer--error "Neither curl nor wget found")))))
+  (let ((curl-exe (lsp-installer--executable-find 'curl)))
+    (unless curl-exe
+      (lsp-installer--err "curl not found in PATH"))
+    (let ((exit-code
+           (lsp-installer--run-command
+            curl-exe
+            (list "-L" "-f" "--create-dirs" "-o" target-file url))))
+      (unless (= exit-code 0)
+        (lsp-installer--err "curl download failed (exit code: %d)"
+                            exit-code)))))
 
 (defun lsp-installer--extract-archive
     (archive target-dir &optional strip-components)
   "Extract ARCHIVE to TARGET-DIR with optional STRIP-COMPONENTS."
   (lsp-installer--ensure-directory target-dir)
   (cond
+   ;; ZIP files
+   ((string-match-p "\\.zip\\'" archive)
+    (let ((unzip-exe
+           (or (executable-find "unzip") (executable-find "7z"))))
+      (unless unzip-exe
+        (lsp-installer--err "unzip or 7z not found"))
+      (let* ((is-7z
+              (string-match-p
+               "7z" (file-name-nondirectory (or unzip-exe ""))))
+             (cmd
+              (if is-7z
+                  (list "x" archive (concat "-o" target-dir))
+                (list "-d" target-dir archive)))
+             (exit-code (lsp-installer--run-command unzip-exe cmd)))
+        (unless (= exit-code 0)
+          (lsp-installer--err
+           "unzip extraction failed (exit code: %d)"
+           exit-code)))))
    ;; TAR archives
    ((or (string-match-p "\\.tar\\.gz\\'" archive)
         (string-match-p "\\.tar\\.xz\\'" archive)
         (string-match-p "\\.tgz\\'" archive))
-    (let* ((tar-exe (lsp-installer--executable-find 'tar))
+    (let* ((is-xz (string-match-p "xz" archive))
            (compression
-            (if (string-match-p "xz" archive)
+            (if is-xz
                 "J"
               "z"))
+           (tar-exe (lsp-installer--executable-find 'tar))
            (args
-            `(,(concat "-x" compression "f")
-              ,archive
-              "-C"
-              ,target-dir)))
+            (list
+             (concat "-x" compression "f") archive "-C" target-dir)))
       (unless tar-exe
-        (lsp-installer--error "tar not found"))
+        (lsp-installer--err "tar not found"))
       (when strip-components
         (setq args
               (append
@@ -503,71 +445,12 @@
                (list
                 "--strip-components"
                 (number-to-string strip-components)))))
-      (let ((exit-code
-             (apply #'call-process
-                    tar-exe
-                    nil
-                    "*lsp-installer*"
-                    t
-                    args)))
+      (let ((exit-code (lsp-installer--run-command tar-exe args)))
         (unless (= exit-code 0)
-          (lsp-installer--error
-           "tar extraction failed (exit code: %d)"
-           exit-code)))))
-   ;; ZIP archives
-   ((string-match-p "\\.zip" archive)
-    (let ((unzip-exe (lsp-installer--executable-find 'unzip))
-          (7z-exe (lsp-installer--executable-find '7z)))
-      (cond
-       ;; Use unzip if available
-       (unzip-exe
-        (let ((exit-code
-               (call-process unzip-exe
-                             nil
-                             "*lsp-installer*"
-                             t
-                             "-o"
-                             archive
-                             "-d"
-                             target-dir)))
-          (unless (= exit-code 0)
-            (lsp-installer--error "unzip failed (exit code: %d)"
-                                  exit-code))))
-       ;; Use 7zip if available
-       (7z-exe
-        (let ((exit-code
-               (call-process 7z-exe
-                             nil
-                             "*lsp-installer*"
-                             t
-                             "x"
-                             archive
-                             (concat "-o" target-dir)
-                             "-y")))
-          (unless (= exit-code 0)
-            (lsp-installer--error
-             "7z extraction failed (exit code: %d)"
-             exit-code))))
-       ;; Fallback to PowerShell on Windows
-       ((eq system-type 'windows-nt)
-        (let
-            ((exit-code
-              (call-process
-               "powershell"
-               nil "*lsp-installer*" t "-Command"
-               (format
-                "Expand-Archive -Path '%s' -DestinationPath '%s' -Force"
-                archive target-dir))))
-          (unless (= exit-code 0)
-            (lsp-installer--error
-             "PowerShell zip extraction failed (exit code: %d)"
-             exit-code))))
-       ;; No extraction method available
-       (t
-        (lsp-installer--error
-         "No zip extraction tool found (unzip, 7z, or PowerShell)")))))
+          (lsp-installer--err "tar extraction failed (exit code: %d)"
+                              exit-code)))))
    (t
-    (lsp-installer--error "Unsupported archive format: %s" archive))))
+    (lsp-installer--err "Unsupported archive format: %s" archive))))
 
 ;;; Binary installation with simplified selection
 
@@ -615,8 +498,8 @@
                   repo-path))
          (temp-buffer (url-retrieve-synchronously api-url t)))
     (unless temp-buffer
-      (lsp-installer--error "Failed to fetch GitHub API for %s"
-                            repo-path))
+      (lsp-installer--err "Failed to fetch GitHub API for %s"
+                          repo-path))
     (with-current-buffer temp-buffer
       (goto-char (point-min))
       (search-forward "\n\n")
@@ -636,10 +519,10 @@
                  (append assets nil)))))
         (kill-buffer)
         (unless best-asset
-          (lsp-installer--error "No suitable asset found for %s"
-                                server-name))
-        (lsp-installer--message "Selected asset: %s"
-                                (cdr (assq 'name best-asset)))
+          (lsp-installer--err "No suitable asset found for %s"
+                              server-name))
+        (lsp-installer--msg "Selected asset: %s"
+                            (cdr (assq 'name best-asset)))
         (lsp-installer--install-binary server-name
                                        (cdr
                                         (assq
@@ -704,40 +587,45 @@
          (options (plist-get config :options)))
     ;; Auto-cleanup: remove existing installation if present
     (when (lsp-installer--server-installed-p server-name)
-      (lsp-installer--message "Removing existing %s installation..."
-                              server-name)
+      (lsp-installer--msg "Removing existing %s installation..."
+                          server-name)
       (let ((server-dir
              (lsp-installer--get-server-install-dir server-name)))
-        (when (file-directory-p server-dir)
-          (delete-directory server-dir t))))
-    (lsp-installer--message "Installing %s via %s..."
-                            server-name
-                            method)
-    (lsp-installer--with-error-handling
-     server-name
-     (cond
-      ((string= method "npm")
-       (lsp-installer--install-npm server-name source))
-      ((string= method "pip")
-       (lsp-installer--install-pip server-name source))
-      ((string= method "go")
-       (lsp-installer--install-go server-name source))
-      ((string= method "gem")
-       (lsp-installer--install-gem server-name source))
-      ((string= method "dotnet")
-       (lsp-installer--install-dotnet server-name source))
-      ((string= method "github")
-       (lsp-installer--install-github server-name source executable
-                                      options))
-      ((string= method "binary")
-       (lsp-installer--install-binary server-name source executable
-                                      options))
-      (t
-       (lsp-installer--error "Unsupported install method: %s"
-                             method)))
-     (lsp-installer--add-to-exec-path server-name)
-     (lsp-installer--message "Successfully installed %s"
-                             server-name))))
+        (delete-directory server-dir t)))
+    (lsp-installer--msg "Installing %s via %s..." server-name method)
+    (condition-case err
+        (progn
+          (cond
+           ((string= method "npm")
+            (lsp-installer--install-npm server-name source))
+           ((string= method "pip")
+            (lsp-installer--install-pip server-name source))
+           ((string= method "go")
+            (lsp-installer--install-go server-name source))
+           ((string= method "gem")
+            (lsp-installer--install-gem server-name source))
+           ((string= method "coursier")
+            (lsp-installer--install-coursier server-name source))
+           ((string= method "dotnet")
+            (lsp-installer--install-dotnet server-name source))
+           ((string= method "github")
+            (lsp-installer--install-github
+             server-name source executable
+             options))
+           ((string= method "binary")
+            (lsp-installer--install-binary
+             server-name source executable
+             options))
+           (t
+            (lsp-installer--err "Unsupported install method: %s"
+                                method)))
+          (lsp-installer--add-to-exec-path server-name)
+          (lsp-installer--msg "Successfully installed %s"
+                              server-name))
+      (error
+       (lsp-installer--err "Failed to install %s: %s"
+                           server-name
+                           (error-message-string err))))))
 
 ;;; Interactive commands
 
@@ -751,12 +639,11 @@
                    "Install server: " available-servers
                    nil t nil 'lsp-installer-server-history nil))))
   ;; Debug: show what server name we actually received
-  (lsp-installer--message "Attempting to install server: %s"
-                          server-name)
+  (lsp-installer--msg "Attempting to install server: %s" server-name)
   ;; Validate that the server name is actually in our available list
   (let ((available-servers (lsp-installer--list-available-servers)))
     (unless (member server-name available-servers)
-      (lsp-installer--error
+      (lsp-installer--err
        "Server %s is not in the available servers list. Available: %s"
        server-name (mapconcat 'identity available-servers ", "))))
   (let ((config (lsp-installer--get-server-config server-name)))
@@ -776,15 +663,15 @@
                  'lsp-installer-server-history
                  nil)))
   (unless (lsp-installer--server-installed-p server-name)
-    (lsp-installer--error "Server %s is not installed" server-name))
+    (lsp-installer--err "Server %s is not installed" server-name))
   (when (y-or-n-p (format "Really uninstall server %s? " server-name))
     (let ((server-dir
            (lsp-installer--get-server-install-dir server-name)))
       (when (file-directory-p server-dir)
         (lsp-installer--remove-from-exec-path server-name)
         (delete-directory server-dir t)
-        (lsp-installer--message "Successfully uninstalled %s"
-                                server-name)))))
+        (lsp-installer--msg "Successfully uninstalled %s"
+                            server-name)))))
 
 ;;;###autoload
 (defun lsp-installer-update-server (server-name)
@@ -801,14 +688,14 @@
   (let ((config (lsp-installer--get-server-config server-name)))
     (lsp-installer--validate-config server-name config)
     (unless (lsp-installer--server-installed-p server-name)
-      (lsp-installer--error "Server %s is not installed" server-name))
-    (lsp-installer--message "Updating %s..." server-name)
+      (lsp-installer--err "Server %s is not installed" server-name))
+    (lsp-installer--msg "Updating %s..." server-name)
     (let ((server-dir
            (lsp-installer--get-server-install-dir server-name)))
       (when (file-directory-p server-dir)
         (delete-directory server-dir t)))
     (lsp-installer--dispatch-installation server-name config)
-    (lsp-installer--message "Successfully updated %s" server-name)))
+    (lsp-installer--msg "Successfully updated %s" server-name)))
 
 ;;;###autoload
 (defun lsp-installer-update-all-servers ()
@@ -816,16 +703,16 @@
   (interactive)
   (let ((installed (lsp-installer--list-installed-servers)))
     (if (null installed)
-        (lsp-installer--message "No language servers are installed")
+        (lsp-installer--msg "No language servers are installed")
       (when (y-or-n-p
              (format "Update %d installed server(s)? "
                      (length installed)))
-        (lsp-installer--message "Updating %d servers..."
-                                (length installed))
+        (lsp-installer--msg "Updating %d servers..."
+                            (length installed))
         (dolist (server-name installed)
           (condition-case err
               (progn
-                (lsp-installer--message "Updating %s..." server-name)
+                (lsp-installer--msg "Updating %s..." server-name)
                 (let ((config
                        (lsp-installer--get-server-config
                         server-name)))
@@ -837,13 +724,13 @@
                       (delete-directory server-dir t)))
                   (lsp-installer--dispatch-installation
                    server-name config)
-                  (lsp-installer--message "Successfully updated %s"
-                                          server-name)))
+                  (lsp-installer--msg "Successfully updated %s"
+                                      server-name)))
             (error
-             (lsp-installer--message "Failed to update %s: %s"
-                                     server-name
-                                     (error-message-string err)))))
-        (lsp-installer--message "Finished updating all servers")))))
+             (lsp-installer--msg "Failed to update %s: %s"
+                                 server-name
+                                 (error-message-string err)))))
+        (lsp-installer--msg "Finished updating all servers")))))
 
 ;;;###autoload
 (defun lsp-installer-list-servers ()
@@ -876,55 +763,13 @@
   (let ((installed (lsp-installer--list-installed-servers)))
     (if installed
         (progn
-          (lsp-installer--message "Setting up paths for %d servers..."
-                                  (length installed))
+          (lsp-installer--msg "Setting up paths for %d servers..."
+                              (length installed))
           (dolist (server installed)
             (lsp-installer--add-to-exec-path server))
-          (lsp-installer--message
-           "Language server paths setup complete"))
-      (lsp-installer--message "No language servers installed"))))
+          (lsp-installer--msg "Language server paths setup complete"))
+      (lsp-installer--msg "No language servers installed"))))
 
-;;; Backward compatibility
-
-;;;###autoload
-(define-obsolete-function-alias
-  'ls-installer-setup
-  'lsp-installer-setup
-  "0.2.0"
-  "Use `lsp-installer-setup' instead.")
-
-;;; Integration helpers
-
-(defun lsp-installer-jdtls-command-info ()
-  "Get jdtls command information for eglot configuration."
-  (when (lsp-installer--server-installed-p "jdtls")
-    (let ((executable
-           (lsp-installer-get-server-executable-path "jdtls")))
-      (when executable
-        `((:executable . ,executable) (:args . ()))))))
-
-(defun lsp-installer-get-server-executable-path (server-name)
-  "Get the full path to SERVER-NAME's executable."
-  (when (lsp-installer--server-installed-p server-name)
-    (let* ((config (lsp-installer--get-server-config server-name))
-           (executable (plist-get config :executable))
-           (server-dir
-            (lsp-installer--get-server-install-dir server-name))
-           (path-dirs (plist-get config :path-dirs))
-           (bin-paths
-            (lsp-installer--expand-path-dirs server-dir path-dirs)))
-      (when executable
-        (or (cl-some
-             (lambda (path)
-               (let ((full-path (expand-file-name executable path)))
-                 (when (file-executable-p full-path)
-                   full-path)))
-             bin-paths)
-            (let ((full-path
-                   (expand-file-name executable server-dir)))
-              (when (file-executable-p full-path)
-                full-path))
-            (executable-find executable))))))
 
 (provide 'lsp-installer)
 
