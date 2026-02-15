@@ -154,12 +154,8 @@
 
 (defun lsp-installer--list-installed-servers ()
   "List all installed servers."
-  (when (file-directory-p lsp-installer-install-dir)
-    (cl-remove-if-not
-     (lambda (dir)
-       (file-directory-p
-        (expand-file-name dir lsp-installer-install-dir)))
-     (directory-files lsp-installer-install-dir nil "^[^.]"))))
+  (let ((available (lsp-installer--list-available-servers)))
+    (cl-remove-if-not #'lsp-installer--server-installed-p available)))
 
 (defun lsp-installer--validate-config (server-name config)
   "Validate server configuration CONFIG for SERVER-NAME."
