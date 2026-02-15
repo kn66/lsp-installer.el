@@ -366,6 +366,14 @@
   :path-dirs ("node_modules/.bin"))
 
  (:name
+  "tailwindcss-language-server"
+  :description "Tailwind CSS language server"
+  :install-method "npm"
+  :source "@tailwindcss/language-server"
+  :executable "tailwindcss-language-server"
+  :path-dirs ("node_modules/.bin"))
+
+ (:name
   "prisma-language-server"
   :description "Prisma language server"
   :install-method "npm"
