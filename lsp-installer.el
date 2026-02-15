@@ -194,6 +194,15 @@
 
 ;;; Path management
 
+(defun lsp-installer--sync-path-env ()
+  "Synchronize PATH environment variable with `exec-path'."
+  (let ((path-entries
+         (delete-dups
+          (append
+           (cl-remove-if-not #'stringp exec-path)
+           (split-string (or (getenv "PATH") "") path-separator t)))))
+    (setenv "PATH" (mapconcat #'identity path-entries path-separator))))
+
 (defun lsp-installer--expand-path-dirs (server-dir path-dirs)
   "Expand PATH-DIRS with wildcard support relative to SERVER-DIR."
   (let ((expanded-paths '()))
@@ -250,6 +259,7 @@
         (add-to-list 'exec-path path)
         (cl-incf added)))
     (when (> added 0)
+      (lsp-installer--sync-path-env)
       (lsp-installer--msg "Added %d path(s) for %s"
                           added
                           server-name))))
@@ -268,6 +278,7 @@
         (setq exec-path (remove path exec-path))
         (cl-incf removed)))
     (when (> removed 0)
+      (lsp-installer--sync-path-env)
       (lsp-installer--msg "Removed %d path(s) for %s"
                           removed
                           server-name))))
@@ -487,7 +498,31 @@
    (t
     (lsp-installer--err "Unsupported archive format: %s" archive))))
 
+(defun lsp-installer--decompress-gzip-file (archive target-file)
+  "Decompress gzip ARCHIVE into TARGET-FILE."
+  (let ((gzip-exe
+         (or (executable-find "gzip")
+             (executable-find "gunzip"))))
+    (unless gzip-exe
+      (lsp-installer--err "gzip or gunzip not found"))
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (let ((exit-code
+             (call-process gzip-exe nil t nil "-d" "-c" archive)))
+        (unless (= exit-code 0)
+          (lsp-installer--err
+           "gzip decompression failed (exit code: %d)"
+           exit-code)))
+      (write-region (point-min) (point-max) target-file nil 'silent))))
+
 ;;; Binary installation with simplified selection
+
+(defun lsp-installer--musl-system-p ()
+  "Return non-nil when the current Linux system appears to use musl libc."
+  (or (file-exists-p "/lib/ld-musl-x86_64.so.1")
+      (file-exists-p "/lib/ld-musl-aarch64.so.1")
+      (file-exists-p "/usr/lib/ld-musl-x86_64.so.1")
+      (file-exists-p "/usr/lib/ld-musl-aarch64.so.1")))
 
 (defun lsp-installer--score-asset (asset-name server-name)
   "Score ASSET-NAME for SERVER-NAME based on platform compatibility."
@@ -523,6 +558,21 @@
       ;; Prefer main clangd package over indexing tools
       (when (string-match-p "indexing.tools" name)
         (cl-decf score 30)))
+    (when (and (string= server-name "rust-analyzer")
+               (eq system-type 'gnu/linux))
+      ;; rust-analyzer provides both gnu and musl Linux builds.
+      ;; Prefer a libc variant that matches the current system.
+      (if (lsp-installer--musl-system-p)
+          (progn
+            (when (string-match-p "musl" name)
+              (cl-incf score 8))
+            (when (string-match-p "gnu" name)
+              (cl-decf score 8)))
+        (progn
+          (when (string-match-p "gnu" name)
+            (cl-incf score 8))
+          (when (string-match-p "musl" name)
+            (cl-decf score 8)))))
     score))
 
 (defun lsp-installer--installable-asset-p (asset-name)
@@ -616,14 +666,27 @@
                          (expand-file-name executable extract-dir)))
                     (when (file-exists-p exec-path)
                       (lsp-installer--make-executable exec-path)))))
-            ;; Single file - copy to extract directory with original name
-            (let ((target-file
-                   (expand-file-name
-                    (or (file-name-nondirectory executable) filename)
-                    extract-dir)))
-              (lsp-installer--ensure-directory extract-dir)
-              (copy-file temp-file target-file t)
-              (lsp-installer--make-executable target-file))))
+            (if (and (string-match-p "\\.gz\\'" filename)
+                     (not (string-match-p "\\.tar\\.gz\\'" filename)))
+                ;; Gzip-compressed single file (e.g. rust-analyzer)
+                (let ((target-file
+                       (expand-file-name
+                        (or (file-name-nondirectory executable)
+                            (file-name-sans-extension filename))
+                        extract-dir)))
+                  (lsp-installer--ensure-directory extract-dir)
+                  (lsp-installer--decompress-gzip-file temp-file
+                                                      target-file)
+                  (lsp-installer--make-executable target-file))
+              ;; Single file - copy to extract directory with original name
+              (let ((target-file
+                     (expand-file-name
+                      (or (file-name-nondirectory executable)
+                          filename)
+                      extract-dir)))
+                (lsp-installer--ensure-directory extract-dir)
+                (copy-file temp-file target-file t)
+                (lsp-installer--make-executable target-file)))))
       ;; Cleanup
       (when (file-exists-p temp-dir)
         (delete-directory temp-dir t)))))
@@ -826,6 +889,7 @@
                               (length installed))
           (dolist (server installed)
             (lsp-installer--add-to-exec-path server))
+          (lsp-installer--sync-path-env)
           (lsp-installer--msg "Language server paths setup complete"))
       (lsp-installer--msg "No language servers installed"))))
 
