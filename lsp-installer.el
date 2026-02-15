@@ -208,6 +208,31 @@
             (push full-pattern expanded-paths)))))
     (nreverse expanded-paths)))
 
+(defun lsp-installer--resolve-executable-candidates (server-name config)
+  "Resolve executable candidate paths for SERVER-NAME from CONFIG."
+  (let* ((server-dir (lsp-installer--get-server-install-dir server-name))
+         (executable (plist-get config :executable))
+         (path-dirs (plist-get config :path-dirs))
+         (search-dirs (cons server-dir
+                            (lsp-installer--expand-path-dirs
+                             server-dir path-dirs)))
+         (candidates nil))
+    (dolist (dir search-dirs)
+      (push (expand-file-name executable dir) candidates))
+    (nreverse (delete-dups candidates))))
+
+(defun lsp-installer--installed-executable-p (server-name config)
+  "Return non-nil when SERVER-NAME executable exists according to CONFIG."
+  (let* ((executable (plist-get config :executable))
+         (candidates
+          (lsp-installer--resolve-executable-candidates
+           server-name config))
+         (has-wildcard (string-match-p "[*?]" executable)))
+    (if has-wildcard
+        (cl-some (lambda (pattern) (file-expand-wildcards pattern))
+                 candidates)
+      (cl-some #'file-exists-p candidates))))
+
 (defun lsp-installer--add-to-exec-path (server-name)
   "Add SERVER-NAME's bin directories to exec-path."
   (let* ((server-dir
@@ -487,6 +512,17 @@
         (cl-decf score 30)))
     score))
 
+(defun lsp-installer--installable-asset-p (asset-name)
+  "Return non-nil when ASSET-NAME looks like an installable artifact."
+  (let ((name (downcase asset-name)))
+    (and
+     (not (string-match-p
+           "sha256\\|sha512\\|checksums\\|checksum\\|\\.sig\\'\\|\\.asc\\'\\|\\.sbom\\'\\|provenance\\|\\.txt\\'"
+           name))
+     (or
+      (string-match-p "\\.zip\\'\\|\\.tgz\\'\\|\\.tar\\.gz\\'\\|\\.tar\\.xz\\'" name)
+      (not (string-match-p "\\.\\(md\\|txt\\|json\\)\\'" name))))))
+
 (defun lsp-installer--install-github
     (server-name repo-path executable &optional options)
   "Install binary from GitHub release for SERVER-NAME."
@@ -502,9 +538,15 @@
       (search-forward "\n\n")
       (let* ((release-data (json-read))
              (assets (cdr (assq 'assets release-data)))
+             (candidates
+              (cl-remove-if-not
+               (lambda (asset)
+                 (lsp-installer--installable-asset-p
+                  (cdr (assq 'name asset))))
+               (append assets nil)))
              ;; Find best asset using scoring
              (best-asset
-              (when (and assets (> (length assets) 0))
+              (when (and candidates (> (length candidates) 0))
                 (cl-reduce
                  (lambda (a b)
                    (if (> (lsp-installer--score-asset
@@ -513,7 +555,7 @@
                            (cdr (assq 'name b)) server-name))
                        a
                      b))
-                 (append assets nil)))))
+                 candidates))))
         (kill-buffer)
         (unless best-asset
           (lsp-installer--err "No suitable asset found for %s"
@@ -621,6 +663,11 @@
            (t
             (lsp-installer--err "Unsupported install method: %s"
                                 method)))
+          (unless (lsp-installer--installed-executable-p
+                   server-name config)
+            (lsp-installer--err
+             "Executable not found after install: %s"
+             executable))
           (lsp-installer--add-to-exec-path server-name)
           (when (and backup-dir (file-directory-p backup-dir))
             (delete-directory backup-dir t))
