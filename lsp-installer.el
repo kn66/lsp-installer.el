@@ -581,14 +581,19 @@
   (let* ((method (plist-get config :install-method))
          (source (plist-get config :source))
          (executable (plist-get config :executable))
-         (options (plist-get config :options)))
-    ;; Auto-cleanup: remove existing installation if present
-    (when (lsp-installer--server-installed-p server-name)
-      (lsp-installer--msg "Removing existing %s installation..."
+         (options (plist-get config :options))
+         (server-dir (lsp-installer--get-server-install-dir server-name))
+         (backup-dir nil))
+    ;; Preserve previous installation so we can restore it on failure.
+    (when (file-directory-p server-dir)
+      (setq backup-dir
+            (make-temp-name
+             (expand-file-name
+              (format ".%s-backup-" server-name)
+              lsp-installer-install-dir)))
+      (lsp-installer--msg "Backing up existing %s installation..."
                           server-name)
-      (let ((server-dir
-             (lsp-installer--get-server-install-dir server-name)))
-        (delete-directory server-dir t)))
+      (rename-file server-dir backup-dir))
     (lsp-installer--msg "Installing %s via %s..." server-name method)
     (condition-case err
         (progn
@@ -617,9 +622,15 @@
             (lsp-installer--err "Unsupported install method: %s"
                                 method)))
           (lsp-installer--add-to-exec-path server-name)
+          (when (and backup-dir (file-directory-p backup-dir))
+            (delete-directory backup-dir t))
           (lsp-installer--msg "Successfully installed %s"
                               server-name))
       (error
+       (when (file-directory-p server-dir)
+         (delete-directory server-dir t))
+       (when (and backup-dir (file-directory-p backup-dir))
+         (rename-file backup-dir server-dir t))
        (lsp-installer--err "Failed to install %s: %s"
                            server-name
                            (error-message-string err))))))
@@ -687,10 +698,6 @@
     (unless (lsp-installer--server-installed-p server-name)
       (lsp-installer--err "Server %s is not installed" server-name))
     (lsp-installer--msg "Updating %s..." server-name)
-    (let ((server-dir
-           (lsp-installer--get-server-install-dir server-name)))
-      (when (file-directory-p server-dir)
-        (delete-directory server-dir t)))
     (lsp-installer--dispatch-installation server-name config)
     (lsp-installer--msg "Successfully updated %s" server-name)))
 
@@ -714,11 +721,6 @@
                        (lsp-installer--get-server-config
                         server-name)))
                   (lsp-installer--validate-config server-name config)
-                  (let ((server-dir
-                         (lsp-installer--get-server-install-dir
-                          server-name)))
-                    (when (file-directory-p server-dir)
-                      (delete-directory server-dir t)))
                   (lsp-installer--dispatch-installation
                    server-name config)
                   (lsp-installer--msg "Successfully updated %s"
