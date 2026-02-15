@@ -39,6 +39,7 @@
 (require 'cl-lib)
 (require 'json)
 (require 'url)
+(defvar read-eval)
 
 ;;; Configuration
 
