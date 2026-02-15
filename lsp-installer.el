@@ -126,7 +126,8 @@
       (with-temp-buffer
         (insert-file-contents lsp-installer-servers-file)
         (goto-char (point-min))
-        (setq lsp-installer--servers-cache (read (current-buffer))))))
+        (let ((read-eval nil))
+          (setq lsp-installer--servers-cache (read (current-buffer)))))))
   lsp-installer--servers-cache)
 
 ;;;###autoload
