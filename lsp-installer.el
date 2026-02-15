@@ -69,6 +69,7 @@
     (dotnet . "dotnet")
     (gem . "gem")
     (curl . "curl")
+    (wget . "wget")
     (tar . "tar")
     (java . "java"))
   "Alist of executable names.")
@@ -411,16 +412,27 @@
 (defun lsp-installer--download-file (url target-file)
   "Download file from URL to TARGET-FILE."
   (lsp-installer--ensure-directory (file-name-directory target-file))
-  (let ((curl-exe (lsp-installer--executable-find 'curl)))
-    (unless curl-exe
-      (lsp-installer--err "curl not found in PATH"))
-    (let ((exit-code
-           (lsp-installer--run-command
-            curl-exe
-            (list "-L" "-f" "--create-dirs" "-o" target-file url))))
-      (unless (= exit-code 0)
-        (lsp-installer--err "curl download failed (exit code: %d)"
-                            exit-code)))))
+  (let ((curl-exe (lsp-installer--executable-find 'curl))
+        (wget-exe (lsp-installer--executable-find 'wget)))
+    (cond
+     (curl-exe
+      (let ((exit-code
+             (lsp-installer--run-command
+              curl-exe
+              (list "-L" "-f" "--create-dirs" "-o" target-file url))))
+        (unless (= exit-code 0)
+          (lsp-installer--err "curl download failed (exit code: %d)"
+                              exit-code))))
+     (wget-exe
+      (let ((exit-code
+             (lsp-installer--run-command
+              wget-exe
+              (list "-O" target-file url))))
+        (unless (= exit-code 0)
+          (lsp-installer--err "wget download failed (exit code: %d)"
+                              exit-code))))
+     (t
+      (lsp-installer--err "curl or wget not found in PATH")))))
 
 (defun lsp-installer--extract-archive
     (archive target-dir &optional strip-components)
